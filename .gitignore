@@ -1,0 +1,8 @@
+build/
+.cache/
+*.o
+*.a
+*.so
+*.dylib
+.vscode/
+.clang-tidy
