@@ -42,10 +42,10 @@ cmake --build build
 
 Optional flags:
 
-| Flag | Default | Description |
-|---|---|---|
-| `LFRB_BUILD_TESTS` | `ON` | Build GTest unit tests |
-| `LFRB_BUILD_BENCHMARKS` | `ON` | Build Google Benchmark suite |
+| Flag                    | Default | Description                  |
+| ----------------------- | ------- | ---------------------------- |
+| `LFRB_BUILD_TESTS`      | `ON`    | Build GTest unit tests       |
+| `LFRB_BUILD_BENCHMARKS` | `ON`    | Build Google Benchmark suite |
 
 ## Running Benchmarks
 
@@ -60,13 +60,13 @@ The script pins threads to specific cores on Linux (`taskset`) and uses `caffein
 
 Measured on Apple M-series (8 cores, 64 KB L1-D, 4 MB L2), macOS 15.5, AppleClang 17, `-O3 -march=native`. 10 repetitions, aggregates only.
 
-| Benchmark | Threads | Mean latency | Throughput | CV |
-|---|:---:|---:|---:|---:|
-| `MutexQueue` (single-thread) | 1 | 9.4 ns | 108M ops/s | 2.5% |
-| `SPSCPush` (single-thread) | 1 | 10.8 ns | 93M ops/s | 0.4% |
-| `MutexQueueThroughput` (2-thread) | 2 | 58.0 ns | ~17M ops/s | 8.5% |
-| `SPSCThroughput` (2-thread) | 2 | 53.4 ns | ~19M ops/s | 10.5% |
-| `SPSCOneWayLatency` (2-thread) | 2 | 71.3 ns | — | 3.5% |
+| Benchmark                         | Threads | Mean latency | Throughput |    CV |
+| --------------------------------- | :-----: | -----------: | ---------: | ----: |
+| `MutexQueue` (single-thread)      |    1    |       9.4 ns | 108M ops/s |  2.5% |
+| `SPSCPush` (single-thread)        |    1    |      10.8 ns |  93M ops/s |  0.4% |
+| `MutexQueueThroughput` (2-thread) |    2    |      58.0 ns | ~17M ops/s |  8.5% |
+| `SPSCThroughput` (2-thread)       |    2    |      53.4 ns | ~19M ops/s | 10.5% |
+| `SPSCOneWayLatency` (2-thread)    |    2    |      71.3 ns |          — |  3.5% |
 
 ### What the numbers mean
 
@@ -77,3 +77,11 @@ Measured on Apple M-series (8 cores, 64 KB L1-D, 4 MB L2), macOS 15.5, AppleClan
 **One-way latency (71.3 ns):** Measures the time from a timestamp being written by the producer to it being read by the consumer — pure cross-core communication cost. Both threads use `CLOCK_UPTIME_RAW` (Apple Silicon hardware timebase) for nanosecond-accurate stamping. The ~18 ns gap above throughput latency reflects the timestamp overhead added per item.
 
 **Key takeaway:** Lock-free SPSC wins under real producer/consumer load, and the advantage grows with contention. On a system where the mutex would be contested by multiple producers or consumers, `MpmcRingBuffer` eliminates that entirely at the cost of a slightly higher per-operation CAS.
+
+### Why real_time > cpu_time on the mutex 2T benchmark
+
+The 18 ns gap between `real_time` (56.6 ns) and `cpu_time` (38.5 ns)
+represents time the producer thread spent **off-CPU** — blocked in the
+kernel waiting for lock acquisition. The SPSC shows no such gap
+(real ≈ cpu) because it never makes a kernel call. On x86-64 Linux
+under higher load, this gap typically widens to 200–400 ns.
