@@ -15,6 +15,7 @@ target_compile_options(spsc_ring_buffer INTERFACE
 )
 
 option(LFRB_BUILD_TESTS "Build tests" ON)
+option(LFRB_BUILD_BENCHMARKS "Build benchmarks" ON)
 
 if(LFRB_BUILD_TESTS)
     enable_testing()
@@ -27,5 +28,34 @@ if(LFRB_BUILD_TESTS)
         gtest_discover_tests(spsc_tests)
     elseif(NOT GTest_FOUND)
         message(STATUS "GTest not found — skipping tests. Install it or set LFRB_BUILD_TESTS=OFF.")
+    endif()
+endif()
+
+if(LFRB_BUILD_BENCHMARKS)
+    find_package(benchmark QUIET)
+
+    if(NOT benchmark_FOUND)
+        message(STATUS "Google Benchmark not found via find_package — fetching via FetchContent.")
+        include(FetchContent)
+        set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+        # macOS regex detection fails to compile in benchmark's try_run checks;
+        # force POSIX regex which is always available on macOS/Linux.
+        set(HAVE_POSIX_REGEX 1 CACHE INTERNAL "" FORCE)
+        FetchContent_Declare(
+            googlebenchmark
+            GIT_REPOSITORY https://github.com/google/benchmark.git
+            GIT_TAG        v1.9.1
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_MakeAvailable(googlebenchmark)
+    endif()
+
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark.cpp")
+        add_executable(ring_buffer_bench benchmark/benchmark.cpp)
+        target_link_libraries(ring_buffer_bench PRIVATE spsc_ring_buffer benchmark::benchmark)
+        target_compile_options(ring_buffer_bench PRIVATE
+            $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native>
+        )
     endif()
 endif()

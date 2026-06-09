@@ -26,52 +26,49 @@ public:
   }
 
   bool push(const T &item) noexcept {
-    std::size_t tail = tail.load(std::memory_order_relaxed);
+    std::size_t pos = tail.load(std::memory_order_relaxed);
 
     while (true) {
-      Slot &slot = slots[tail & Mask];
+      Slot &slot = slots[pos & Mask];
       std::size_t seq = slot.sequence.load(std::memory_order_acquire);
       std::intptr_t diff =
-          static_cast<std::intptr_t>(seq) - static_cast<std::intptr_t>(tail);
+          static_cast<std::intptr_t>(seq) - static_cast<std::intptr_t>(pos);
 
       if (diff == 0) {
-        // Slot is ready to write — try to claim it
-        if (tail.compare_exchange_weak(tail, tail + 1,
+        if (tail.compare_exchange_weak(pos, pos + 1,
                                        std::memory_order_relaxed)) {
           slot.data = item;
-          // Signal slot is ready to consume
-          slot.sequence.store(tail + 1, std::memory_order_release);
+          slot.sequence.store(pos + 1, std::memory_order_release);
           return true;
         }
       } else if (diff < 0) {
         return false; // buffer full
       } else {
-        tail = tail.load(std::memory_order_relaxed); // retry
+        pos = tail.load(std::memory_order_relaxed); // retry
       }
     }
   }
 
   std::optional<T> pop() noexcept {
-    std::size_t head = head.load(std::memory_order_relaxed);
+    std::size_t pos = head.load(std::memory_order_relaxed);
 
     while (true) {
-      Slot &slot = slots[head & Mask];
+      Slot &slot = slots[pos & Mask];
       std::size_t seq = slot.sequence.load(std::memory_order_acquire);
       std::intptr_t diff = static_cast<std::intptr_t>(seq) -
-                           static_cast<std::intptr_t>(head + 1);
+                           static_cast<std::intptr_t>(pos + 1);
 
       if (diff == 0) {
-        if (head.compare_exchange_weak(head, head + 1,
+        if (head.compare_exchange_weak(pos, pos + 1,
                                        std::memory_order_relaxed)) {
           T item = slot.data;
-          // Reset slot for next producer wrap-around
-          slot.sequence.store(head + Capacity, std::memory_order_release);
+          slot.sequence.store(pos + Capacity, std::memory_order_release);
           return item;
         }
       } else if (diff < 0) {
         return std::nullopt; // buffer empty
       } else {
-        head = head.load(std::memory_order_relaxed);
+        pos = head.load(std::memory_order_relaxed);
       }
     }
   }
