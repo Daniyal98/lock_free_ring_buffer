@@ -1,61 +1,78 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.25) # FetchContent SYSTEM: our -Werror must not apply to dependency headers
 project(lock_free_ring_buffer CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(spsc_ring_buffer INTERFACE)
-target_include_directories(spsc_ring_buffer INTERFACE
+option(LFRB_BUILD_TESTS "Build GoogleTest unit/stress tests" ON)
+option(LFRB_BUILD_BENCHMARKS "Build throughput and latency benchmarks" ON)
+set(LFRB_SANITIZER "" CACHE STRING "Sanitizer build: '' | thread | address (address also enables UBSan)")
+
+if(LFRB_SANITIZER STREQUAL "thread")
+    add_compile_options(-fsanitize=thread -g -O1)
+    add_link_options(-fsanitize=thread)
+elseif(LFRB_SANITIZER STREQUAL "address")
+    add_compile_options(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g -O1)
+    add_link_options(-fsanitize=address,undefined)
+elseif(NOT LFRB_SANITIZER STREQUAL "")
+    message(FATAL_ERROR "LFRB_SANITIZER must be empty, 'thread' or 'address'")
+endif()
+
+find_package(Threads REQUIRED)
+
+add_library(lock_free_ring_buffer INTERFACE)
+target_include_directories(lock_free_ring_buffer INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_compile_options(spsc_ring_buffer INTERFACE
-    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>
+target_compile_options(lock_free_ring_buffer INTERFACE
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror>
 )
+target_link_libraries(lock_free_ring_buffer INTERFACE Threads::Threads)
 
-option(LFRB_BUILD_TESTS "Build tests" ON)
-option(LFRB_BUILD_BENCHMARKS "Build benchmarks" ON)
+include(FetchContent)
 
 if(LFRB_BUILD_TESTS)
     enable_testing()
     find_package(GTest QUIET)
-
-    if(GTest_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/spsc_tests.cpp")
-        add_executable(spsc_tests tests/spsc_tests.cpp)
-        target_link_libraries(spsc_tests PRIVATE spsc_ring_buffer GTest::gtest_main)
-        include(GoogleTest)
-        gtest_discover_tests(spsc_tests)
-    elseif(NOT GTest_FOUND)
-        message(STATUS "GTest not found — skipping tests. Install it or set LFRB_BUILD_TESTS=OFF.")
+    if(NOT GTest_FOUND)
+        FetchContent_Declare(googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            GIT_TAG        v1.15.2
+            GIT_SHALLOW    TRUE
+            SYSTEM)
+        set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
     endif()
+
+    add_executable(ring_buffer_tests tests/ring_buffer_tests.cpp)
+    target_link_libraries(ring_buffer_tests PRIVATE lock_free_ring_buffer GTest::gtest_main)
+    include(GoogleTest)
+    gtest_discover_tests(ring_buffer_tests DISCOVERY_TIMEOUT 60)
 endif()
 
 if(LFRB_BUILD_BENCHMARKS)
     find_package(benchmark QUIET)
-
     if(NOT benchmark_FOUND)
-        message(STATUS "Google Benchmark not found via find_package — fetching via FetchContent.")
-        include(FetchContent)
-        set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
-        set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-        # macOS regex detection fails to compile in benchmark's try_run checks;
-        # force POSIX regex which is always available on macOS/Linux.
-        set(HAVE_POSIX_REGEX 1 CACHE INTERNAL "" FORCE)
-        FetchContent_Declare(
-            googlebenchmark
+        FetchContent_Declare(googlebenchmark
             GIT_REPOSITORY https://github.com/google/benchmark.git
-            GIT_TAG        v1.9.1
+            GIT_TAG        v1.9.5
             GIT_SHALLOW    TRUE
-        )
+            SYSTEM)
+        set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+        set(BENCHMARK_ENABLE_WERROR OFF CACHE BOOL "" FORCE) # its own -Werror trips on newer compilers
+        set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(googlebenchmark)
     endif()
 
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/benchmark.cpp")
-        add_executable(ring_buffer_bench benchmark/benchmark.cpp)
-        target_link_libraries(ring_buffer_bench PRIVATE spsc_ring_buffer benchmark::benchmark)
-        target_compile_options(ring_buffer_bench PRIVATE
-            $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-O3 -march=native>
-        )
-    endif()
+    add_executable(ring_buffer_bench benchmark/benchmark.cpp)
+    target_link_libraries(ring_buffer_bench PRIVATE lock_free_ring_buffer benchmark::benchmark)
+
+    add_executable(ring_buffer_latency benchmark/latency.cpp)
+    target_link_libraries(ring_buffer_latency PRIVATE lock_free_ring_buffer)
+
+    foreach(t ring_buffer_bench ring_buffer_latency)
+        target_compile_options(${t} PRIVATE -O3 -march=native)
+    endforeach()
 endif()

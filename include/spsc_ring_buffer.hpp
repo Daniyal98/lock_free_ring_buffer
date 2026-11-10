@@ -4,51 +4,73 @@
 #include <atomic>
 #include <cstddef>
 #include <optional>
+#include <utility>
 
+// Bounded single-producer / single-consumer queue.
+// Exactly one thread may call push() and exactly one other thread may call pop().
+//
+// Memory ordering: the producer writes the slot, then publishes it with a release
+// store of tail_; the consumer's acquire load of tail_ makes the slot write visible.
+// The same pairing on head_ tells the producer a slot is free to overwrite.
+// Slots are plain T: the index release/acquire already orders the data, so no
+// per-slot atomics are needed (and large T stays lock-free).
+//
+// Each side keeps a cached copy of the other side's index and only re-reads the
+// shared one when the cache says full/empty, so the common case touches no
+// cache line owned by the other core.
 template <typename T, std::size_t Capacity> class SpscRingBuffer {
-  static_assert((Capacity & (Capacity - 1)) == 0,
+  static_assert(Capacity >= 2 && (Capacity & (Capacity - 1)) == 0,
                 "Capacity must be a power of 2");
 
   static constexpr std::size_t Mask = Capacity - 1;
 
-  alignas(64) std::atomic<std::size_t> head{0};
-  alignas(64) std::atomic<std::size_t> tail{0};
+  // Producer-owned cache line: write index + producer's view of the read index.
+  alignas(64) std::atomic<std::size_t> tail_{0};
+  std::size_t head_cache_{0};
 
-  alignas(64) std::array<std::atomic<T>, Capacity> buffer{};
+  // Consumer-owned cache line: read index + consumer's view of the write index.
+  alignas(64) std::atomic<std::size_t> head_{0};
+  std::size_t tail_cache_{0};
+
+  alignas(64) std::array<T, Capacity> buffer_{};
 
 public:
-  bool push(const T &item) noexcept {
-    std::size_t current_tail = tail.load(std::memory_order_relaxed);
-    std::size_t next_tail = tail + 1;
-
-    if (next_tail - head.load(std::memory_order_acquire) > Mask) {
-      return false; // Buffer is full
+  // Returns false if the queue is full.
+  bool push(const T &item) {
+    const std::size_t tail = tail_.load(std::memory_order_relaxed);
+    if (tail - head_cache_ == Capacity) {
+      head_cache_ = head_.load(std::memory_order_acquire);
+      if (tail - head_cache_ == Capacity) {
+        return false;
+      }
     }
-
-    buffer[current_tail & Mask].store(item, std::memory_order_release);
-    tail.store(next_tail, std::memory_order_release);
+    buffer_[tail & Mask] = item;
+    tail_.store(tail + 1, std::memory_order_release);
     return true;
   }
 
-  std::optional<T> pop() noexcept {
-    std::size_t current_head = head.load(std::memory_order_relaxed);
-
-    if (current_head == tail.load(std::memory_order_acquire)) {
-      return std::nullopt; // Buffer is empty
+  // Returns std::nullopt if the queue is empty.
+  std::optional<T> pop() {
+    const std::size_t head = head_.load(std::memory_order_relaxed);
+    if (head == tail_cache_) {
+      tail_cache_ = tail_.load(std::memory_order_acquire);
+      if (head == tail_cache_) {
+        return std::nullopt;
+      }
     }
-
-    T item = buffer[current_head & Mask].load(std::memory_order_acquire);
-    head.store(current_head + 1, std::memory_order_release);
+    std::optional<T> item{std::move(buffer_[head & Mask])};
+    head_.store(head + 1, std::memory_order_release);
     return item;
   }
 
-  bool empty() const noexcept {
-    return head.load(std::memory_order_acquire) ==
-           tail.load(std::memory_order_acquire);
+  // Snapshot only: may be stale by the time it returns if other threads are active.
+  // head_ is loaded first so the result can never underflow.
+  std::size_t size() const noexcept {
+    const std::size_t head = head_.load(std::memory_order_acquire);
+    return tail_.load(std::memory_order_acquire) - head;
   }
 
-  std::size_t size() const noexcept {
-    return tail.load(std::memory_order_acquire) -
-           head.load(std::memory_order_acquire);
-  }
+  bool empty() const noexcept { return size() == 0; }
+
+  static constexpr std::size_t capacity() noexcept { return Capacity; }
 };

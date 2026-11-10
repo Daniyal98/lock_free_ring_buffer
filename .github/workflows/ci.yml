@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.compiler }} / ${{ matrix.config }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        config: [release, thread, address]
+    steps:
+      - uses: actions/checkout@v4
+
+      # TSan cannot map its shadow memory with the runner kernel's default ASLR entropy.
+      - name: Reduce ASLR entropy for ThreadSanitizer
+        if: matrix.config == 'thread'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure
+        run: |
+          if [ "${{ matrix.config }}" = release ]; then
+            ARGS="-DCMAKE_BUILD_TYPE=Release"
+          else
+            ARGS="-DLFRB_SANITIZER=${{ matrix.config }} -DLFRB_BUILD_BENCHMARKS=OFF"
+          fi
+          cmake -B build -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} $ARGS
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Latency smoke run
+        if: matrix.config == 'release'
+        run: ./build/ring_buffer_latency 0 1 100000
